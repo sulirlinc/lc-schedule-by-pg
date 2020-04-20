@@ -1,0 +1,20 @@
+{
+  "name": "lc-schedule-by-pg",
+  "version": "1.0.0",
+  "description": "通过读取pg数据库记录来执行工作计划。",
+  "main": "src/index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sulirlinc/lc-schedule-by-pg"
+  },
+  "keywords": [],
+  "author": "linc",
+  "license": "ISC",
+  "dependencies": {
+    "lc-js-common": "^1.0.10",
+    "lc-pg-dao": "^1.0.2"
+  }
+}
