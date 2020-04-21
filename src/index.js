@@ -3,9 +3,9 @@ const dao = require('lc-pg-dao')
 const moduleCode = 'lc.schedule'
 
 const doCreateTable = ({ tableName, dao, fields }) => {
-  return dao.create({
+  return dao.createTable({
     isAutoCreateId: true,
-    primaryKey: [ 'event', 'method' ],
+    uniqueKeys: [ 'event', 'method' ],
     tableName,
     fields
   })
@@ -20,12 +20,17 @@ const fields = [ { name: 'event', type: 'VARCHAR(255)' },
 ];
 
 const start = ({ dao, tableName, action, logger = { info: () => {} } }) => {
-  dao.findByWhere({ tableName, data: { status: 1 } }).then(({ timeUnit, interval, triggerId, event, method }) => {
-    const id = L.timer.putTrigger({ id: triggerId, timeUnit: TimeUnit[timeUnit], interval, trigger: () => action({ timeUnit, interval, triggerId, event, method }) })
-    if (!triggerId) {
-      dao.update({ tableName, primaryKeys: { event, method }, data: { triggerId: id } })
+  dao.findByWhere({ tableName, data: { status: 1 } }).then(datas => {
+    if (!datas) {
+      return
     }
-    logger.info(`trigger:${ event }[${ method }],id:${ id } Startup complete.`)
+    datas.map(({ timeUnit, interval, triggerId, event, method }) => {
+      const id = L.timer.putTrigger({ id: triggerId, timeUnit: TimeUnit[timeUnit], interval, trigger: () => action({ timeUnit, interval, triggerId, event, method }) })
+      if (!triggerId) {
+        dao.update({ tableName, primaryKeys: { event, method }, data: { triggerId: id } })
+      }
+      logger.info(`trigger:${ event }[${ method }],id:${ id } Startup complete.`)
+    })
   })
 }
 
@@ -39,6 +44,7 @@ const deleteTrigger = ({ dao, triggerId, tableName, logger, deleteOnPG }) => {
   }
 }
 
+const LC_PG_DAO_DATA_IS_EXISTS = 'lc.pg.dao.data.is.exists';
 module.exports = class LCSchedule {
 
   /**
@@ -55,7 +61,7 @@ module.exports = class LCSchedule {
   constructor(options = {}) {
     const { pgConfig, tableName = 'z_sys_schedule', logger = { info: () => {}, error: () => {} } } = options
     this.initStatus = { done: {}, error: {} }
-    this.options = options;
+    this.options = { ...options, tableName, logger };
     this.initPGDAO({ config: pgConfig }).then((dao) => {
       this.initStatus.done.pgDAO = true
       doCreateTable({
@@ -81,13 +87,22 @@ module.exports = class LCSchedule {
    */
   checkError() {
     const { logger = { info: () => {} } } = this.options
-    this.initStatus.error.map((data) => {
+    for (const key in this.initStatus.error) {
+      const data = this.initStatus.error[key]
       logger.info(data)
       throw data.error
-    })
+    }
   }
 
-  trigger() {
+  /**
+   * 当前方法需要覆盖。
+   * @param timeUnit
+   * @param interval
+   * @param triggerId
+   * @param event
+   * @param method
+   */
+  trigger({ timeUnit, interval, triggerId, event, method }) {
 
   }
 
@@ -96,30 +111,46 @@ module.exports = class LCSchedule {
     return this.dao.findByPagination({ tableName, data })
   }
 
-  async addSchedule({ persistence = false, rightNow = true, event, method, methodName, triggerId, timeUnit, interval, status = 1 }) {
+  async addSchedule({ persistence = false, rightNow = true, event, method, triggerId, timeUnit, interval, status = 1 }) {
     this.do('persistence')({ persistence })
-    this.do('rightNow')({ rightNow, id: triggerId, timeUnit, interval, trigger: this.trigger({ timeUnit, interval, triggerId, event, method }) })
+    const id = this.do('rightNow')({ rightNow, triggerId, timeUnit, interval, event, method, trigger: this.trigger })
+    if (!triggerId) {
+      triggerId = id
+    }
     const { tableName } = this.options
-    return await this.dao.insertData({
-      tableName, primaryKeys: { event, method }, data: { triggerId, timeUnit, interval, event, method, status, methodName }
-    })
+    let insertData
+    try {
+      insertData = await this.dao.insertData({ tableName, primaryKeys: { event, method }, data: { triggerId, timeUnit, interval, event, method, status, createAt: L.now() } })
+    } catch (e) {
+      if (LC_PG_DAO_DATA_IS_EXISTS !== e.code) {
+        throw e
+      }
+    }
+    return {
+      insertData,
+      triggerId
+    }
   }
 
-  removeSchedule({ triggerId, method, methodName, deleteOnPG = false }) {
+  removeSchedule({ triggerId, method, event, deleteOnPG = false }) {
     const { tableName, logger } = this.options
-    if (!deleteTrigger({ dao: this.dao, triggerId, tableName, logger, deleteOnPG }) && !L.isNullOrEmpty(method) && L.isNullOrEmpty(methodName)) {
+    if (!deleteTrigger({ dao: this.dao, triggerId, tableName, logger, deleteOnPG }) && !L.isNullOrEmpty(method) && L.isNullOrEmpty(event)) {
       this.checkError()
       const { tableName, logger } = this.options
-      this.dao.findByWhere({ tableName, data: { method, methodName } }).then(({ triggerId }) => {
+      this.dao.findByWhere({ tableName, data: { method, event } }).then((datas) => {
+        if (!datas) {
+          return
+        }
+        const { triggerId } = datas[0]
         if (deleteTrigger({ dao: this.dao, triggerId, tableName, logger, deleteOnPG })) {
           return
         }
-        logger.error({
+        throw {
           error: new Error(),
-          info: { triggerId, method, methodName },
+          info: { triggerId, method, event },
           message: '未找到可删除的ID编号。',
           code: `${ moduleCode }.cannot.find.delete.id`,
-        })
+        }
       }).catch(error => logger.error(error))
     }
   }
@@ -128,13 +159,12 @@ module.exports = class LCSchedule {
     this.events = this.events || {
       persistence: ({ persistence }) => ({ true: this.checkError() }[persistence] || (() => {}))(),
       rightNow: ({
-        rightNow, id,
-        timeUnit, interval, trigger
+        rightNow, triggerId, timeUnit, interval, event, method, trigger
       }) => {
         return ({
-          true: L.timer.putTrigger({
-            id,
-            timeUnit, interval, trigger
+          true: () => L.timer.putTrigger({
+            id: triggerId,
+            timeUnit: TimeUnit[timeUnit], interval, trigger: () => trigger({ triggerId, timeUnit, interval, event, method })
           })
         }[rightNow] || (() => {}))()
       }
