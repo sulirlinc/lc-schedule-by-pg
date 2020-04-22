@@ -1,6 +1,6 @@
 {
   "name": "lc-schedule-by-pg",
-  "version": "1.0.13",
+  "version": "1.0.14",
   "description": "通过读取pg数据库记录来执行工作计划。",
   "main": "src/index.js",
   "scripts": {
